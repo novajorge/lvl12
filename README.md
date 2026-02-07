@@ -97,16 +97,19 @@ LOG_LEVEL="info"                     # Logging level (default: info)
 
 ### Workspace Directory
 
-The workspace is where Claude Code runs. It should contain your configuration:
+The workspace is where Claude Code runs. It defines the agent's behavior, permissions, and available skills. The repository includes an example workspace in `workspace/` that you can use as a starting point:
 
 ```
-$BENDER_WORKSPACE/
-├── CLAUDE.md              # Your instructions for Claude Code
+workspace/                           # Example agent configuration
+├── CLAUDE.md                        # Agent instructions (identity, behavior, rules)
 ├── .claude/
-│   ├── commands/          # Custom slash commands (skills)
-│   └── settings.json      # Claude Code settings
+│   ├── commands/                    # Skills (slash commands available to the agent)
+│   │   └── hello.md                # Example skill
+│   └── settings.json               # Tool permissions (pre-approved commands)
 └── (your project files)
 ```
+
+**To customize:** Edit the `workspace/` contents or replace them entirely with your own configuration. The `CLAUDE.md` file controls the agent's behavior, `.claude/commands/` defines available skills, and `.claude/settings.json` sets which tools the agent can use without manual approval.
 
 ## Usage
 
@@ -218,6 +221,8 @@ bender/
 │   ├── test_session_manager.py    # Session mapping tests
 │   ├── test_slack_handler.py      # Slack handler tests
 │   └── test_slack_utils.py        # Message splitting tests
+├── workspace/                     # Example agent configuration (CLAUDE.md, skills, settings)
+├── docker/                        # Infra-oriented Dockerfile (kubectl, vault, argocd)
 ├── pyproject.toml                 # Project metadata and dependencies
 ├── CLAUDE.md                      # Development instructions
 └── README.md                      # This file

@@ -7,7 +7,7 @@ services:
     ports:
       - "${BENDER_API_PORT:-8080}:8080"
     volumes:
-      - ./private/workspace:/workspace
+      - ./workspace:/workspace
       - claude-data:/root/.claude
     restart: unless-stopped
 
