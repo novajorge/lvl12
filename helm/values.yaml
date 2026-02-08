@@ -1,0 +1,107 @@
+# Number of pod replicas (session state requires 1 replica)
+replicaCount: 1
+
+# Container image configuration
+image:
+  repository: ghcr.io/helmcode/bender
+  tag: "infra-0.0.2"
+  pullPolicy: IfNotPresent
+
+# Registry credentials (only needed for private repositories)
+# Leave empty for public GitHub Container Registry
+imageCredentials:
+  registry: ""
+  username: ""
+  password: ""
+
+# Vault configuration for secrets
+vault:
+  # Connection configuration
+  connectionRef: vault-connection
+  address: https://vault.helmcode.com
+  skipTLSVerify: false
+
+  # Authentication configuration
+  authRef: vault-auth
+  kubernetesAuthMount: kubernetes
+  kubernetesRole: vault-auth
+  serviceAccountName: bender-sa
+  audiences:
+    - vault
+
+  # Secrets configuration
+  # All secrets are stored in Vault at: helmcode_platform/bender
+  secrets:
+    env:
+      staticSecretRef: bender-vault-secret
+      mount: helmcode_platform
+      path: bender
+      destinationSecretName: bender-env-secret
+      refreshAfter: 30s
+
+# Persistent Volume Claim for Claude Code session data (~/.claude)
+persistence:
+  enabled: true
+  storageClass: ""  # Use default storage class
+  accessMode: ReadWriteOnce
+  size: 5Gi
+  mountPath: /root/.claude
+
+# Workspace volume configuration
+# The workspace contains CLAUDE.md, skills, settings, and references
+workspace:
+  # Mount path inside the container
+  mountPath: /workspace
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# Ingress configuration (disabled by default)
+ingress:
+  enabled: false
+
+# Resource limits and requests
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+# Service account configuration
+serviceAccount:
+  create: true
+  name: bender-sa
+  annotations: {}
+
+# RBAC configuration for in-cluster Kubernetes access
+# Binds to cluster-admin — permission boundaries are enforced by the agent (CLAUDE.md, skills)
+rbac:
+  create: true
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext: {}
+
+# Container security context
+# Note: Claude Code and npm require write access to home directory,
+# running as root is needed for ~/.claude persistence
+securityContext: {}
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Additional environment variables (non-secret)
+env: {}

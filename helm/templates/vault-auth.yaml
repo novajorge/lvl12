@@ -1,0 +1,19 @@
+{{- if .Values.vault.authRef -}}
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultAuth
+metadata:
+  name: {{ .Values.vault.authRef }}
+  labels:
+    {{- include "bender.labels" . | nindent 4 }}
+spec:
+  vaultConnectionRef: {{ .Values.vault.connectionRef }}
+  method: kubernetes
+  mount: {{ .Values.vault.kubernetesAuthMount }}
+  kubernetes:
+    role: {{ .Values.vault.kubernetesRole }}
+    serviceAccount: {{ include "bender.serviceAccountName" . }}
+    {{- if .Values.vault.audiences }}
+    audiences:
+      {{- toYaml .Values.vault.audiences | nindent 6 }}
+    {{- end }}
+{{- end }}
