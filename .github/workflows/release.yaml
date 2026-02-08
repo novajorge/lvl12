@@ -44,6 +44,24 @@ jobs:
             echo "created=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Update Helm chart version
+        if: steps.check.outputs.created == 'true'
+        run: |
+          VERSION="${{ steps.extract.outputs.version }}"
+          sed -i "s/^version: .*/version: $VERSION/" helm/Chart.yaml
+          sed -i "s/^appVersion: .*/appVersion: \"$VERSION\"/" helm/Chart.yaml
+          sed -i "s/^  tag: .*/  tag: \"infra-$VERSION\"/" helm/values.yaml
+
+      - name: Commit Helm chart updates
+        if: steps.check.outputs.created == 'true'
+        run: |
+          VERSION="${{ steps.extract.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add helm/Chart.yaml helm/values.yaml
+          git commit -m "Update Helm chart to v$VERSION"
+          git push origin main
+
       - name: Create tag and GitHub release
         if: steps.check.outputs.created == 'true'
         env:
