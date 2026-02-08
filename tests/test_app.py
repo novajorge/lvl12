@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+from bender import __version__
 from bender.app import BenderApp, create_app
 from bender.config import Settings
 
@@ -20,7 +21,7 @@ class TestCreateApp:
         """FastAPI app has correct title and version."""
         app = create_app(settings)
         assert app.fastapi_app.title == "Bender API"
-        assert app.fastapi_app.version == "0.1.0"
+        assert app.fastapi_app.version == __version__
 
     @patch("bender.app.AsyncSocketModeHandler")
     def test_settings_stored(self, mock_handler_cls, settings: Settings) -> None:

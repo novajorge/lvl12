@@ -123,7 +123,7 @@ class TestInvokeClaude:
         assert "--resume" not in cmd_args
 
     async def test_invocation_with_resume(self, tmp_path: Path) -> None:
-        """Passes --resume and --session-id when resume=True."""
+        """Passes --resume <session_id> when resume=True."""
         json_output = json.dumps({"result": "resumed"})
         mock_process = AsyncMock()
         mock_process.communicate = AsyncMock(
@@ -138,8 +138,8 @@ class TestInvokeClaude:
 
         cmd_args = mock_exec.call_args[0]
         assert "--resume" in cmd_args
-        assert "--session-id" in cmd_args
         assert "my-session" in cmd_args
+        assert "--session-id" not in cmd_args
 
     async def test_resume_without_session_id_ignored(self, tmp_path: Path) -> None:
         """resume=True without session_id does not add --resume flag."""

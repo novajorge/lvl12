@@ -93,6 +93,7 @@ Claude Code runs in headless mode — all AI interaction is handled by the CLI. 
 │  - ANTHROPIC_API_KEY      (API key) OR                   │
 │    CLAUDE_CODE_OAUTH_TOKEN (Max subscription token)      │
 │  - BENDER_WORKSPACE       (working directory for Claude) │
+│  - BENDER_API_KEY         (Bearer token for HTTP API)    │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -177,8 +178,11 @@ CLAUDE_CODE_OAUTH_TOKEN="..."        # Max subscription token (via `claude setup
 # Optional
 BENDER_WORKSPACE="/home/agent"       # Working directory for Claude Code (default: cwd)
 BENDER_API_PORT="8080"               # FastAPI port (default: 8080)
+BENDER_API_KEY="your-secret-key"     # Bearer token for HTTP API authentication
 LOG_LEVEL="info"                     # Logging level (default: info)
 ```
+
+> **Note:** The `/api/invoke` endpoint requires a Bearer token (`BENDER_API_KEY`). If `BENDER_API_KEY` is not configured, the endpoint returns HTTP 503 (fail-closed behavior).
 
 ### Workspace directory
 
@@ -191,12 +195,14 @@ $BENDER_WORKSPACE/
 │   ├── commands/                    # User-defined slash commands (skills)
 │   │   ├── my-skill.md
 │   │   └── another-skill.md
-│   ├── settings.json                # Claude Code settings
+│   ├── settings.json                # Claude Code settings (tool permissions)
 │   └── teams/                       # Agent team definitions (if using teams)
 │       └── my-team/
 │           └── config.json
 └── (any other files the user needs)
 ```
+
+The repository includes an example workspace in `workspace/` that you can use as a starting point. The root `docker-compose.yaml` mounts this directory by default. To customize, replace its contents or point `BENDER_WORKSPACE` to your own directory.
 
 ### Slack App setup
 
@@ -222,6 +228,13 @@ Bender runs as a single application managing all channels. It does not need one 
 
 ### Docker
 
+Two Dockerfiles are provided:
+
+- **`Dockerfile`** (root) — Base image with Python + Node.js + Claude Code CLI. Suitable for general-purpose agents.
+- **`docker/Dockerfile`** — Infrastructure variant that adds kubectl, vault, and argocd CLIs on top of the base image. Suitable for SRE/DevOps agents that need to interact with Kubernetes clusters, Vault, and ArgoCD.
+
+Base Dockerfile:
+
 ```dockerfile
 FROM python:3.12-slim
 
@@ -240,6 +253,28 @@ COPY src/ /app/src/
 WORKDIR /app
 CMD ["python", "-m", "bender"]
 ```
+
+Docker Compose (root) — mounts `./workspace` with the example agent configuration:
+
+```yaml
+services:
+  bender:
+    build: .
+    container_name: bender
+    env_file:
+      - .env
+    ports:
+      - "${BENDER_API_PORT:-8080}:8080"
+    volumes:
+      - ./workspace:/workspace
+      - claude-data:/root/.claude
+    restart: unless-stopped
+
+volumes:
+  claude-data:
+```
+
+The infra variant (`docker/docker-compose.yaml`) builds from `docker/Dockerfile` and can be customized to mount a different workspace with infrastructure-specific skills and tools.
 
 ### Kubernetes (example)
 
@@ -306,11 +341,6 @@ spec:
 | Thread → Session mapping | In-memory dictionary | Lost on restart. Threads after restart create new sessions. |
 | Conversation history | Slack threads | Messages stay in Slack. No separate storage needed. |
 
-### Future improvements
-
-- Persist thread → session mapping to SQLite or Redis for crash recovery
-- Store session data on a PVC for pod persistence
-
 ---
 
 ## Security Considerations
@@ -331,19 +361,41 @@ Bender itself is a thin layer, but it invokes Claude Code which can execute arbi
 bender/
 ├── src/
 │   └── bender/
-│       ├── __init__.py
+│       ├── __init__.py              # Package metadata
 │       ├── __main__.py              # Entry point
-│       ├── app.py                   # FastAPI app + slack-bolt setup
-│       ├── slack_handler.py         # Slack event handlers (@mention, thread replies)
-│       ├── api.py                   # HTTP API endpoints (/api/invoke)
+│       ├── app.py                   # FastAPI app + slack-bolt wiring
+│       ├── api.py                   # HTTP API endpoints (/api/invoke, /health)
+│       ├── claude_code.py           # Claude Code CLI subprocess wrapper
+│       ├── config.py                # Environment variable loading (pydantic-settings)
 │       ├── session_manager.py       # Thread ↔ Session mapping
-│       ├── claude_code.py           # Claude Code CLI invocation (subprocess)
-│       └── config.py                # Environment variable loading
-├── Dockerfile
-├── pyproject.toml
-├── CLAUDE.md
-├── README.md
-└── LICENSE
+│       ├── slack_handler.py         # Slack event handlers (@mention, thread replies)
+│       └── slack_utils.py           # Message splitting utilities (Slack 4000-char limit)
+├── tests/
+│   ├── conftest.py                  # Shared fixtures
+│   ├── test_api.py                  # API endpoint tests
+│   ├── test_app.py                  # App wiring tests
+│   ├── test_claude_code.py          # CLI invocation tests
+│   ├── test_config.py               # Config loading tests
+│   ├── test_session_manager.py      # Session mapping tests
+│   ├── test_slack_handler.py        # Slack handler tests
+│   └── test_slack_utils.py          # Message splitting tests
+├── workspace/                       # Example agent configuration
+│   ├── CLAUDE.md                    # Agent instructions (identity, behavior, rules)
+│   └── .claude/
+│       ├── commands/
+│       │   └── hello.md             # Example skill
+│       └── settings.json            # Tool permissions (pre-approved commands)
+├── docker/                          # Infrastructure-oriented Docker variant
+│   ├── Dockerfile                   # Base + kubectl, vault, argocd
+│   └── docker-compose.yaml          # Compose for infra agent
+├── Dockerfile                       # Base Docker image
+├── docker-compose.yaml              # Compose with example workspace
+├── pyproject.toml                   # Project metadata and dependencies
+├── .env.example                     # Environment variable template
+├── .gitignore
+├── CLAUDE.md                        # Development instructions (this file)
+├── README.md                        # User-facing documentation
+└── LICENSE                          # MIT License
 ```
 
 ---
@@ -390,11 +442,20 @@ Create an agent team for developing Bender with these roles: Dev, Quality, and Q
 
 ---
 
-## Development Priorities
+## Development Status
 
-1. **Slack connection** — slack-bolt Socket Mode, listen for @mentions and thread replies
-2. **Claude Code invocation** — Subprocess wrapper, headless mode, JSON output
-3. **Session management** — Thread ↔ Session mapping, `--resume` support
-4. **HTTP API** — FastAPI endpoint for external triggers
-5. **Docker image** — Containerized deployment
-6. **Documentation** — README with setup instructions and examples
+All core features are implemented and tested:
+
+- [x] **Slack connection** — slack-bolt Socket Mode, @mentions and thread replies
+- [x] **Claude Code invocation** — Subprocess wrapper, headless mode, JSON output
+- [x] **Session management** — Thread ↔ Session mapping, `--resume` support
+- [x] **HTTP API** — FastAPI endpoint for external triggers with Bearer token auth
+- [x] **Docker images** — Base image + infrastructure variant (kubectl, vault, argocd)
+- [x] **Test suite** — 83 tests across all modules (pytest)
+- [x] **Documentation** — README, CLAUDE.md, example workspace
+
+### Future improvements
+
+- Persist thread → session mapping to SQLite or Redis for crash recovery
+- Store session data on a PVC for pod persistence in Kubernetes
+- Python SDK integration (claude-agent-sdk) as alternative to CLI subprocess

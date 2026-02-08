@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 
+from bender import __version__
 from bender.api import create_api
 from bender.config import Settings
 from bender.session_manager import SessionManager
@@ -42,7 +43,7 @@ def create_app(settings: Settings) -> BenderApp:
     socket_handler = AsyncSocketModeHandler(bolt_app, settings.slack_app_token)
 
     # FastAPI app
-    fastapi_app = FastAPI(title="Bender API", version="0.1.0")
+    fastapi_app = FastAPI(title="Bender API", version=__version__)
     create_api(fastapi_app, bolt_app.client, settings, sessions)
 
     return BenderApp(

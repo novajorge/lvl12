@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bender"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Open-source framework that connects Slack to Claude Code in headless mode"
 requires-python = ">=3.12"
 dependencies = [
@@ -23,6 +23,9 @@ dev = [
     "ruff>=0.8.0",
     "mypy>=1.13.0",
 ]
+
+[tool.setuptools.dynamic]
+version = {attr = "bender.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
