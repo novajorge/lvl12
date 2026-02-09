@@ -52,6 +52,12 @@ persistence:
 workspace:
   # Mount path inside the container
   mountPath: /workspace
+  # Git-based workspace provisioning (cloned on pod start via init container)
+  git:
+    enabled: false
+    repository: ""      # e.g., git@gitlab.helmcode.com:helmcode/bender-workspace.git
+    branch: main
+    sshKeyField: GIT_SSH_KEY  # Field name in the Vault secret containing the deploy key
 
 # Service configuration
 service:

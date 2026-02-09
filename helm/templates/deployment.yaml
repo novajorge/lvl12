@@ -29,6 +29,26 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.workspace.git.enabled }}
+      initContainers:
+        - name: clone-workspace
+          image: alpine/git:latest
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /root/.ssh
+              cp /secrets/{{ .Values.workspace.git.sshKeyField }} /root/.ssh/id_ed25519
+              chmod 600 /root/.ssh/id_ed25519
+              export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
+              git clone --single-branch --branch {{ .Values.workspace.git.branch }} {{ .Values.workspace.git.repository }} /workspace
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: ssh-key
+              mountPath: /secrets
+              readOnly: true
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -75,6 +95,11 @@ spec:
       volumes:
         - name: workspace
           emptyDir: {}
+        {{- if .Values.workspace.git.enabled }}
+        - name: ssh-key
+          secret:
+            secretName: {{ .Values.vault.secrets.env.destinationSecretName }}
+        {{- end }}
         {{- if .Values.persistence.enabled }}
         - name: claude-data
           persistentVolumeClaim:
