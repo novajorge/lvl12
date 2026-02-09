@@ -76,7 +76,7 @@ data:
         -H "Content-Type: application/json" \
         -d "{
           \"channel\": \"${SLACK_CHANNEL}\",
-          \"message\": \"New Leantime task assigned: ID ${task_id}. Read task details from Leantime API and follow the assigned tasks workflow.\"
+          \"message\": \"New Leantime task assigned: ${LEANTIME_URL}/tickets/showKanban?search=true&projectId=${PROJECT_ID}&sprint=all#/tickets/showTicket/${task_id} — Read task details from Leantime API and follow the assigned tasks workflow.\"
         }" 2>&1)
 
       if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
