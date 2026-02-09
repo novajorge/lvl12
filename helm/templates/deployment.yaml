@@ -33,21 +33,21 @@ spec:
       initContainers:
         - name: clone-workspace
           image: alpine/git:latest
+          env:
+            - name: GIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.vault.secrets.env.destinationSecretName }}
+                  key: {{ .Values.workspace.git.tokenField }}
           command:
             - sh
             - -c
             - |
-              mkdir -p /root/.ssh
-              cp /secrets/{{ .Values.workspace.git.sshKeyField }} /root/.ssh/id_ed25519
-              chmod 600 /root/.ssh/id_ed25519
-              export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
-              git clone --single-branch --branch {{ .Values.workspace.git.branch }} {{ .Values.workspace.git.repository }} /workspace
+              REPO_URL=$(echo "{{ .Values.workspace.git.repository }}" | sed "s|https://|https://{{ .Values.workspace.git.tokenUser }}:${GIT_TOKEN}@|")
+              git clone --single-branch --branch {{ .Values.workspace.git.branch }} "${REPO_URL}" /workspace
           volumeMounts:
             - name: workspace
               mountPath: /workspace
-            - name: ssh-key
-              mountPath: /secrets
-              readOnly: true
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
@@ -95,11 +95,6 @@ spec:
       volumes:
         - name: workspace
           emptyDir: {}
-        {{- if .Values.workspace.git.enabled }}
-        - name: ssh-key
-          secret:
-            secretName: {{ .Values.vault.secrets.env.destinationSecretName }}
-        {{- end }}
         {{- if .Values.persistence.enabled }}
         - name: claude-data
           persistentVolumeClaim:

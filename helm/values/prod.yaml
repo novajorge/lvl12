@@ -12,5 +12,7 @@ persistence:
 workspace:
   git:
     enabled: true
-    repository: git@ssh.gitlab.helmcode.com:helmcode/bender-workspace.git
+    repository: https://gitlab.helmcode.com/helmcode/bender-workspace.git
     branch: main
+    tokenUser: bender
+    tokenField: GIT_SSH_KEY
