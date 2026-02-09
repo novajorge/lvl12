@@ -8,3 +8,9 @@ resources:
 
 persistence:
   size: 10Gi
+
+workspace:
+  git:
+    enabled: true
+    repository: git@ssh.gitlab.helmcode.com:helmcode/bender-workspace.git
+    branch: main
