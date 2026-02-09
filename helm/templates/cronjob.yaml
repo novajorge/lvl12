@@ -1,0 +1,191 @@
+{{- if .Values.cronjob.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bender.fullname" . }}-poll-script
+  labels:
+    {{- include "bender.labels" . | nindent 4 }}
+data:
+  poll.sh: |
+    #!/bin/bash
+    #
+    # Leantime polling script — detects new tasks assigned to Bender
+    # All configuration comes from environment variables (Vault secret)
+    #
+    set -euo pipefail
+
+    # Required env vars (from Vault):
+    #   LEANTIME_URL, LEANTIME_API_KEY, BENDER_API_KEY,
+    #   SLACK_BOT_TOKEN, SLACK_CHANNEL,
+    #   LEANTIME_PROJECT_ID, LEANTIME_STATUS_NEW, LEANTIME_EDITOR_ID,
+    #   LEANTIME_VALID_TAGS (comma-separated)
+    #
+    # Optional:
+    #   BENDER_API_URL (defaults to in-cluster service)
+
+    BENDER_API_URL="${BENDER_API_URL:-http://{{ include "bender.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local}"
+    PROJECT_ID="${LEANTIME_PROJECT_ID:-3}"
+    STATUS_NEW="${LEANTIME_STATUS_NEW:-3}"
+    EDITOR_ID="${LEANTIME_EDITOR_ID:-17}"
+
+    IFS=',' read -ra VALID_TAGS <<< "${LEANTIME_VALID_TAGS:-}"
+
+    log()   { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"; }
+    error() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2; }
+
+    notify_bender() {
+      local task_id
+      task_id=$(echo "$1" | jq -r '.id')
+
+      local http_code
+      http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BENDER_API_URL}/api/invoke" \
+        -H "Authorization: Bearer ${BENDER_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"channel\": \"${SLACK_CHANNEL}\",
+          \"message\": \"New Leantime task assigned: ID ${task_id}. Read task details from Leantime API and follow the assigned tasks workflow.\"
+        }" 2>&1)
+
+      if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
+        log "Bender notified for task $task_id (HTTP $http_code)"
+      else
+        error "Failed to notify Bender for task $task_id (HTTP $http_code)"
+        return 1
+      fi
+    }
+
+    notify_slack() {
+      local message="$1"
+      if [[ -z "${SLACK_BOT_TOKEN:-}" ]]; then
+        error "SLACK_BOT_TOKEN not set"
+        return 1
+      fi
+      curl -s -X POST "https://slack.com/api/chat.postMessage" \
+        -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{\"channel\":\"${SLACK_CHANNEL}\",\"text\":\"${message}\"}" > /dev/null 2>&1
+    }
+
+    validate_task() {
+      local task_json="$1"
+      local task_id headline description tags
+      task_id=$(echo "$task_json" | jq -r '.id')
+      headline=$(echo "$task_json" | jq -r '.headline // empty')
+      description=$(echo "$task_json" | jq -r '.description // empty')
+      tags=$(echo "$task_json" | jq -r '.tags // empty')
+
+      local errors=()
+      [[ -z "$headline" ]] && errors+=("missing headline")
+      [[ -z "$description" ]] && errors+=("missing description")
+
+      if [[ -z "$tags" ]]; then
+        errors+=("no client tag")
+      else
+        local tag_count
+        tag_count=$(echo "$tags" | tr ',' '\n' | wc -l)
+        if [[ $tag_count -gt 1 ]]; then
+          errors+=("multiple tags: '$tags' (must have exactly 1)")
+        else
+          local tag_valid=false
+          for valid_tag in "${VALID_TAGS[@]}"; do
+            [[ "$tags" == "$valid_tag" ]] && tag_valid=true && break
+          done
+          [[ "$tag_valid" == "false" ]] && errors+=("invalid tag: '$tags'")
+        fi
+      fi
+
+      if [[ ${#errors[@]} -gt 0 ]]; then
+        local error_msg="Task ID $task_id has validation issues:\\n"
+        for err in "${errors[@]}"; do error_msg+="  - $err\\n"; done
+        error_msg+="\\nPlease correct before processing.\\n"
+        error_msg+="Link: ${LEANTIME_URL}/tickets/showKanban#/tickets/showTicket/$task_id"
+        log "Task $task_id failed validation: ${errors[*]}"
+        notify_slack "$error_msg"
+        return 1
+      fi
+      return 0
+    }
+
+    # === MAIN ===
+    log "=== Leantime polling start ==="
+
+    if [[ -z "${LEANTIME_API_KEY:-}" ]]; then
+      error "LEANTIME_API_KEY not set"
+      exit 1
+    fi
+
+    response=$(curl -s "${LEANTIME_URL}/api/jsonrpc" \
+      -H "x-api-key: ${LEANTIME_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"jsonrpc\": \"2.0\",
+        \"method\": \"leantime.rpc.tickets.getAll\",
+        \"params\": {},
+        \"id\": 1
+      }" 2>&1)
+
+    tasks=$(echo "$response" | jq -c ".result[] | select(.projectId == $PROJECT_ID and .status == $STATUS_NEW and .editorId == \"$EDITOR_ID\")" 2>/dev/null || echo "")
+
+    if [[ -z "$tasks" ]]; then
+      log "No new tasks assigned."
+    else
+      task_count=0
+      while IFS= read -r task; do
+        if [[ -n "$task" ]]; then
+          task_id=$(echo "$task" | jq -r '.id')
+          log "Processing task $task_id..."
+          if validate_task "$task"; then
+            notify_bender "$task"
+          fi
+          ((task_count++))
+        fi
+      done <<< "$tasks"
+      log "Processed $task_count task(s)."
+    fi
+
+    log "=== Leantime polling end ==="
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "bender.fullname" . }}-poll
+  labels:
+    {{- include "bender.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronjob.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.cronjob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.cronjob.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.cronjob.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            {{- include "bender.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: poll
+              image: curlimages/curl:8.5.0
+              command: ["/bin/sh", "/scripts/poll.sh"]
+              envFrom:
+                - secretRef:
+                    name: {{ .Values.vault.secrets.env.destinationSecretName }}
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 50m
+                  memory: 32Mi
+          volumes:
+            - name: script
+              configMap:
+                name: {{ include "bender.fullname" . }}-poll-script
+                defaultMode: 0755
+{{- end }}

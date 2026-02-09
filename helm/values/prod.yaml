@@ -16,3 +16,6 @@ workspace:
     branch: main
     tokenUser: bender
     tokenField: GIT_SSH_KEY
+
+cronjob:
+  enabled: true

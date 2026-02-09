@@ -112,3 +112,13 @@ affinity: {}
 
 # Additional environment variables (non-secret)
 env: {}
+
+# CronJob for polling external task management systems (e.g., Leantime)
+# Detects new tasks assigned to Bender and triggers processing via HTTP API
+cronjob:
+  enabled: false
+  # Schedule in cron format (default: every 5 minutes)
+  schedule: "*/5 * * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  backoffLimit: 1
