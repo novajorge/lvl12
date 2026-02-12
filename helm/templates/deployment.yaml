@@ -45,9 +45,17 @@ spec:
             - |
               REPO_URL=$(echo "{{ .Values.workspace.git.repository }}" | sed "s|https://|https://{{ .Values.workspace.git.tokenUser }}:${GIT_TOKEN}@|")
               git clone --single-branch --branch {{ .Values.workspace.git.branch }} "${REPO_URL}" /workspace
+              # Configure SSH for GitHub access using key from workspace
+              if [ -f /workspace/.ssh/id_ed25519 ]; then
+                cp /workspace/.ssh/id_ed25519 /ssh-config/id_ed25519
+                chmod 600 /ssh-config/id_ed25519
+                ssh-keyscan -t ed25519 github.com >> /ssh-config/known_hosts 2>/dev/null
+              fi
           volumeMounts:
             - name: workspace
               mountPath: /workspace
+            - name: ssh-config
+              mountPath: /ssh-config
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
@@ -92,8 +100,12 @@ spec:
             - name: claude-data
               mountPath: {{ .Values.persistence.mountPath }}
             {{- end }}
+            - name: ssh-config
+              mountPath: /root/.ssh
       volumes:
         - name: workspace
+          emptyDir: {}
+        - name: ssh-config
           emptyDir: {}
         {{- if .Values.persistence.enabled }}
         - name: claude-data
