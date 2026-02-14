@@ -78,6 +78,7 @@ async def invoke_claude(
     session_id: str | None = None,
     resume: bool = False,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    model: str | None = None,
 ) -> ClaudeResponse:
     """Invoke Claude Code CLI in headless mode via subprocess.
 
@@ -87,6 +88,7 @@ async def invoke_claude(
         session_id: Session ID for new or resumed sessions.
         resume: Whether to resume an existing session.
         timeout: Maximum execution time in seconds.
+        model: Optional model name (for Ollama or custom Claude models).
 
     Returns:
         ClaudeResponse with the parsed result.
@@ -98,6 +100,10 @@ async def invoke_claude(
     claude_executable = _find_claude_executable()
 
     cmd = [claude_executable, "--print", "--output-format", "json"]
+
+    # Add model flag if specified (for Ollama or custom models)
+    if model:
+        cmd.extend(["--model", model])
 
     if resume and session_id:
         cmd.extend(["--resume", session_id])

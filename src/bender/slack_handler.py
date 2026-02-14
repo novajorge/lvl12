@@ -46,6 +46,7 @@ def register_handlers(app: AsyncApp, settings: Settings, sessions: SessionManage
                 prompt=text,
                 workspace=settings.bender_workspace,
                 session_id=session_id,
+                model=settings.anthropic_model,
             )
             logger.info("Claude Code response received (length=%d)", len(response.result))
 
@@ -89,6 +90,7 @@ def register_handlers(app: AsyncApp, settings: Settings, sessions: SessionManage
                 workspace=settings.bender_workspace,
                 session_id=session_id,
                 resume=True,
+                model=settings.anthropic_model,
             )
             logger.info("Claude Code response received (length=%d)", len(response.result))
 

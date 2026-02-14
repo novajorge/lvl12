@@ -92,6 +92,7 @@ def create_api(
                 prompt=request.message,
                 workspace=settings.bender_workspace,
                 session_id=session_id,
+                model=settings.anthropic_model,
             )
         except ClaudeCodeError as exc:
             logger.error("Claude Code invocation failed: %s", exc)

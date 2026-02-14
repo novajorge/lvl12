@@ -1,8 +1,10 @@
 """Configuration module — loads and validates environment variables."""
 
 import logging
+import os
 from pathlib import Path
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -25,11 +27,37 @@ class Settings(BaseSettings):
     # Optional: API key for authenticating external HTTP requests
     bender_api_key: str | None = None
 
+    # Optional: API mode (claude or ollama)
+    bender_api_mode: str = "claude"  # "claude" or "ollama"
+
+    # Optional: Model to use (for ollama mode or custom Claude models)
+    # Will be populated by validator from OLLAMA_MODEL or ANTHROPIC_MODEL
+    anthropic_model: str | None = None
+
+    # Optional: Custom base URL (for Ollama proxy)
+    anthropic_base_url: str | None = None
+
     model_config = {
         "case_sensitive": False,
         "env_file": ".env",
         "env_file_encoding": "utf-8",
+        "extra": "ignore",  # Ignore extra env vars like OLLAMA_MODEL_7b, MINIMAX_MODEL_CHAT, etc.
     }
+
+    @model_validator(mode="before")
+    @classmethod
+    def load_model_from_env(cls, data: dict) -> dict:
+        """Load model from provider-specific env vars (OLLAMA_MODEL, MINIMAX_MODEL, etc.)."""
+        if "anthropic_model" not in data or data["anthropic_model"] is None:
+            # Try provider-specific models first, then generic ANTHROPIC_MODEL
+            model = (
+                os.getenv("OLLAMA_MODEL")
+                or os.getenv("MINIMAX_MODEL")
+                or os.getenv("ANTHROPIC_MODEL")
+            )
+            if model:
+                data["anthropic_model"] = model
+        return data
 
     def validate_auth(self) -> None:
         """Ensure at least one Claude Code authentication method is configured."""
