@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # Optional: Custom base URL (for Ollama proxy)
     anthropic_base_url: str | None = None
 
+    # Optional: Timeout for Claude Code invocations (in seconds)
+    # Set to 0 for no timeout (unlimited)
+    # Default: 7200 (2 hours)
+    claude_timeout: int = 7200
+
     model_config = {
         "case_sensitive": False,
         "env_file": ".env",

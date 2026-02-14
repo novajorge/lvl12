@@ -5,13 +5,17 @@ import json
 import logging
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import AsyncGenerator, Callable, Awaitable
 
 logger = logging.getLogger(__name__)
 
-# Default timeout for Claude Code invocations (5 minutes)
-DEFAULT_TIMEOUT_SECONDS = 300
+# Default timeout for Claude Code invocations (10 minutes)
+DEFAULT_TIMEOUT_SECONDS = 600
+
+# Streaming update interval (seconds) - how often to call the progress callback
+STREAMING_UPDATE_INTERVAL = 15
 
 
 def _find_claude_executable() -> str:
@@ -68,6 +72,17 @@ class ClaudeResponse:
     is_error: bool = False
 
 
+@dataclass
+class StreamingProgress:
+    """Progress information during streaming."""
+
+    current_text: str = ""
+    tool_name: str | None = None
+    tool_status: str | None = None  # "running", "completed", "error"
+    is_thinking: bool = False
+    total_cost: float = 0.0
+
+
 class ClaudeCodeError(Exception):
     """Raised when Claude Code CLI invocation fails."""
 
@@ -79,6 +94,8 @@ async def invoke_claude(
     resume: bool = False,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     model: str | None = None,
+    progress_callback: Callable[[], Awaitable[None]] | None = None,
+    progress_interval: float = 30.0,
 ) -> ClaudeResponse:
     """Invoke Claude Code CLI in headless mode via subprocess.
 
@@ -89,6 +106,8 @@ async def invoke_claude(
         resume: Whether to resume an existing session.
         timeout: Maximum execution time in seconds.
         model: Optional model name (for Ollama or custom Claude models).
+        progress_callback: Optional async callback called periodically to indicate progress.
+        progress_interval: Seconds between progress callbacks.
 
     Returns:
         ClaudeResponse with the parsed result.
@@ -99,7 +118,7 @@ async def invoke_claude(
     # Find claude executable
     claude_executable = _find_claude_executable()
 
-    cmd = [claude_executable, "--print", "--output-format", "json"]
+    cmd = [claude_executable, "--print", "--verbose", "--output-format", "json"]
 
     # Add model flag if specified (for Ollama or custom models)
     if model:
@@ -128,10 +147,37 @@ async def invoke_claude(
             cwd=workspace,
         )
 
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(),
-            timeout=timeout,
-        )
+        # Start progress callback task if provided
+        progress_task = None
+        if progress_callback:
+            async def progress_loop():
+                while True:
+                    await asyncio.sleep(progress_interval)
+                    if progress_callback:
+                        await progress_callback()
+
+            progress_task = asyncio.create_task(progress_loop())
+
+        try:
+            # If timeout is 0, use None for no timeout
+            actual_timeout = timeout if timeout > 0 else None
+            if actual_timeout:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=actual_timeout,
+                )
+            else:
+                # No timeout - wait indefinitely
+                stdout, stderr = await process.communicate()
+        finally:
+            # Cancel progress task if running
+            if progress_task and not progress_task.done():
+                progress_task.cancel()
+                try:
+                    await progress_task
+                except asyncio.CancelledError:
+                    pass
+
     except FileNotFoundError as exc:
         raise ClaudeCodeError(
             f"Failed to execute Claude Code CLI at {claude_executable}: {exc}"
@@ -140,6 +186,16 @@ async def invoke_claude(
         if process is not None:
             process.kill()
             await process.wait()
+        # Clean up the session directory if it exists
+        if session_id:
+            try:
+                session_dir = Path.home() / ".claude" / "projects" / session_id
+                if session_dir.exists():
+                    import shutil
+                    shutil.rmtree(session_dir)
+                    logger.info("Cleaned up timed out session: %s", session_id)
+            except Exception as cleanup_err:
+                logger.warning("Failed to clean up session %s: %s", session_id, cleanup_err)
         raise ClaudeCodeError(f"Claude Code timed out after {timeout}s")
 
     if process.returncode != 0:
@@ -162,7 +218,58 @@ def _parse_response(raw_output: str, session_id: str) -> ClaudeResponse:
     logger.debug("Parsing response (length=%d)", len(raw_output))
 
     try:
+        # First try to parse as a single JSON object
         data = json.loads(raw_output)
+
+        # Handle case where response is a list of events
+        if isinstance(data, list):
+            logger.debug("Claude Code response is a list with %d events", len(data))
+            # Find the "result" event which contains the final response
+            final_result = ""
+            returned_session_id = session_id
+            is_error = False
+
+            for event in data:
+                if isinstance(event, dict):
+                    event_type = event.get("type") or event.get("subtype")
+                    # Look for the result event
+                    if event_type == "result":
+                        final_result = event.get("result", "")
+                        returned_session_id = event.get("session_id", returned_session_id)
+                        is_error = event.get("is_error", False)
+                    # Also check for success subtype
+                    elif event.get("subtype") == "success":
+                        final_result = event.get("result", final_result)
+
+            if final_result:
+                logger.debug("Found result in event list (length=%d)", len(final_result))
+                return ClaudeResponse(
+                    result=final_result,
+                    session_id=returned_session_id,
+                    is_error=is_error,
+                )
+
+            # If no result found in events, extract text from assistant messages
+            for event in data:
+                if isinstance(event, dict):
+                    if event.get("type") == "assistant":
+                        msg = event.get("message", {})
+                        content = msg.get("content", [])
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "")
+                                if text:
+                                    logger.debug("Found text in assistant message (length=%d)", len(text))
+                                    return ClaudeResponse(
+                                        result=text,
+                                        session_id=returned_session_id,
+                                        is_error=False,
+                                    )
+
+            # Fallback: return raw text if no result found
+            logger.warning("No result found in event list, using raw text")
+            return ClaudeResponse(result=raw_output.strip(), session_id=session_id)
+
         logger.debug("Parsed JSON keys: %s", list(data.keys()))
     except json.JSONDecodeError as exc:
         # If output is not valid JSON, treat the raw text as the result
@@ -183,3 +290,197 @@ def _parse_response(raw_output: str, session_id: str) -> ClaudeResponse:
         session_id=returned_session_id,
         is_error=is_error,
     )
+
+
+async def invoke_claude_streaming(
+    prompt: str,
+    workspace: Path,
+    session_id: str | None = None,
+    resume: bool = False,
+    model: str | None = None,
+    progress_callback: Callable[[StreamingProgress], Awaitable[None]] | None = None,
+    update_interval: float = STREAMING_UPDATE_INTERVAL,
+) -> ClaudeResponse:
+    """Invoke Claude Code CLI with streaming output.
+
+    This version uses --output-format stream-json to get real-time updates
+    and calls the progress_callback periodically with status updates.
+
+    Args:
+        prompt: The message/prompt to send to Claude Code.
+        workspace: Working directory where Claude Code runs.
+        session_id: Session ID for new or resumed sessions.
+        resume: Whether to resume an existing session.
+        model: Optional model name (for Ollama or custom Claude models).
+        progress_callback: Async function called with progress updates.
+        update_interval: Seconds between progress callback invocations.
+
+    Returns:
+        ClaudeResponse with the final result.
+
+    Raises:
+        ClaudeCodeError: If the CLI invocation fails.
+    """
+    claude_executable = _find_claude_executable()
+
+    cmd = [claude_executable, "--verbose", "--output-format", "stream-json"]
+
+    if model:
+        cmd.extend(["--model", model])
+
+    if resume and session_id:
+        cmd.extend(["--resume", session_id])
+    elif session_id:
+        cmd.extend(["--session-id", session_id])
+
+    cmd.extend(["--", prompt])
+
+    logger.info(
+        "Invoking Claude Code streaming (session=%s, resume=%s, workspace=%s)",
+        session_id,
+        resume,
+        workspace,
+    )
+
+    process = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=workspace,
+        )
+    except FileNotFoundError as exc:
+        raise ClaudeCodeError(
+            f"Failed to execute Claude Code CLI at {claude_executable}: {exc}"
+        )
+
+    # Track progress state
+    progress = StreamingProgress()
+    final_result = ""
+    returned_session_id = session_id or ""
+    last_update_time = asyncio.get_event_loop().time()
+
+    async def maybe_send_update(force: bool = False) -> None:
+        """Send progress update if enough time has passed."""
+        nonlocal last_update_time
+        if progress_callback is None:
+            return
+        current_time = asyncio.get_event_loop().time()
+        if force or (current_time - last_update_time) >= update_interval:
+            await progress_callback(progress)
+            last_update_time = current_time
+
+    try:
+        # Read stdout line by line for streaming updates
+        line_count = 0
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+
+            line_str = line.decode().strip()
+            line_count += 1
+
+            if not line_str:
+                continue
+
+            # Log first few lines for debugging
+            if line_count <= 5:
+                logger.debug("Stream line %d: %s", line_count, line_str[:200])
+
+            try:
+                event = json.loads(line_str)
+                event_type = event.get("type", "")
+
+                # Handle different event types from stream-json
+                if event_type == "assistant":
+                    # Assistant text message
+                    message = event.get("message", {})
+                    content = message.get("content", [])
+                    for block in content:
+                        if block.get("type") == "text":
+                            progress.current_text = block.get("text", "")
+                            final_result = progress.current_text
+                    progress.is_thinking = False
+                    progress.tool_name = None
+                    await maybe_send_update()
+
+                elif event_type == "content_block_delta":
+                    # Incremental text update
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        progress.current_text += text
+                        final_result = progress.current_text
+
+                elif event_type == "tool_use":
+                    # Tool invocation started
+                    tool_name = event.get("tool", {}).get("name", "unknown")
+                    progress.tool_name = tool_name
+                    progress.tool_status = "running"
+                    progress.is_thinking = False
+                    logger.debug("Tool started: %s", tool_name)
+                    await maybe_send_update(force=True)
+
+                elif event_type == "tool_result":
+                    # Tool completed
+                    progress.tool_status = "completed"
+                    await maybe_send_update(force=True)
+
+                elif event_type == "thinking":
+                    # Model is thinking (extended thinking)
+                    progress.is_thinking = True
+                    progress.tool_name = None
+                    await maybe_send_update()
+
+                elif event_type == "result":
+                    # Final result
+                    final_result = event.get("result", final_result)
+                    returned_session_id = event.get("session_id", returned_session_id)
+                    progress.total_cost = event.get("total_cost_usd", 0.0)
+
+                elif event_type == "error":
+                    # Error event
+                    error_msg = event.get("error", {}).get("message", "Unknown error")
+                    raise ClaudeCodeError(f"Claude Code error: {error_msg}")
+
+            except json.JSONDecodeError as json_err:
+                # Non-JSON line, log and continue
+                logger.debug("Non-JSON streaming line: %s", line_str[:100])
+            except Exception as parse_err:
+                logger.error("Error parsing streaming line: %s | Line: %s", parse_err, line_str[:200])
+                raise
+
+        # Wait for process to complete
+        await process.wait()
+
+        # Check exit code
+        if process.returncode != 0:
+            stderr = await process.stderr.read()
+            error_msg = stderr.decode().strip() if stderr else "Unknown error"
+            logger.error("Claude Code streaming failed (exit=%d): %s", process.returncode, error_msg)
+            raise ClaudeCodeError(f"Claude Code exited with code {process.returncode}: {error_msg}")
+
+        # Send final update
+        progress.tool_name = None
+        progress.tool_status = None
+        progress.is_thinking = False
+        await maybe_send_update(force=True)
+
+        logger.info("Claude Code streaming completed (result length=%d)", len(final_result))
+
+        return ClaudeResponse(
+            result=final_result,
+            session_id=returned_session_id,
+            is_error=False,
+        )
+
+    except Exception as exc:
+        # Kill process on any error
+        if process and process.returncode is None:
+            process.kill()
+            await process.wait()
+        if isinstance(exc, ClaudeCodeError):
+            raise
+        raise ClaudeCodeError(f"Streaming invocation failed: {exc}")

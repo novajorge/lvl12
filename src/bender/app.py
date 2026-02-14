@@ -11,6 +11,7 @@ from slack_bolt.async_app import AsyncApp
 from bender import __version__
 from bender.api import create_api
 from bender.config import Settings
+from bender.job_tracker import JobTracker
 from bender.session_manager import SessionManager
 from bender.slack_handler import register_handlers
 
@@ -37,14 +38,17 @@ def create_app(settings: Settings) -> BenderApp:
     """Create and configure the Bender application."""
     sessions = SessionManager()
 
+    # Job tracker (SQLite-based job persistence)
+    job_tracker = JobTracker(settings.bender_workspace)
+
     # Slack bolt app (Socket Mode)
     bolt_app = AsyncApp(token=settings.slack_bot_token)
-    register_handlers(bolt_app, settings, sessions)
+    register_handlers(bolt_app, settings, sessions, job_tracker)
     socket_handler = AsyncSocketModeHandler(bolt_app, settings.slack_app_token)
 
     # FastAPI app
     fastapi_app = FastAPI(title="Bender API", version=__version__)
-    create_api(fastapi_app, bolt_app.client, settings, sessions)
+    create_api(fastapi_app, bolt_app.client, settings, sessions, job_tracker)
 
     return BenderApp(
         fastapi_app=fastapi_app,

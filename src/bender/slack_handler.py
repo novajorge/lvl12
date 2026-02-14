@@ -2,18 +2,27 @@
 
 import logging
 import re
+import asyncio
+from datetime import datetime
 
 from slack_bolt.async_app import AsyncApp
+from slack_sdk.web.async_client import AsyncWebClient
 
-from bender.claude_code import ClaudeCodeError, invoke_claude
+from bender.claude_code import ClaudeCodeError, invoke_claude, invoke_claude_streaming, StreamingProgress
 from bender.config import Settings
+from bender.job_tracker import JobTracker, JobStatus
 from bender.session_manager import SessionManager
-from bender.slack_utils import SLACK_MSG_LIMIT, md_to_mrkdwn, split_text
+from bender.slack_utils import SLACK_MSG_LIMIT, LONG_RESPONSE_THRESHOLD, md_to_mrkdwn, split_text, create_temp_file
 
 logger = logging.getLogger(__name__)
 
 
-def register_handlers(app: AsyncApp, settings: Settings, sessions: SessionManager) -> None:
+def register_handlers(
+    app: AsyncApp,
+    settings: Settings,
+    sessions: SessionManager,
+    job_tracker: JobTracker | None = None,
+) -> None:
     """Register Slack event handlers on the bolt app."""
 
     @app.event("reaction_added")
@@ -27,7 +36,7 @@ def register_handlers(app: AsyncApp, settings: Settings, sessions: SessionManage
         pass
 
     @app.event("app_mention")
-    async def handle_mention(event: dict, say) -> None:
+    async def handle_mention(event: dict, say, client: AsyncWebClient) -> None:
         """Handle new @Bender mentions — create session and invoke Claude Code."""
         text = _strip_mention(event.get("text", ""))
         thread_ts = event.get("ts", "")
@@ -41,27 +50,178 @@ def register_handlers(app: AsyncApp, settings: Settings, sessions: SessionManage
 
         session_id = await sessions.create_session(thread_ts)
 
+        # Create job tracking record
+        job_id = None
+        if job_tracker:
+            job_id = await job_tracker.create_job(
+                thread_ts=thread_ts,
+                channel=channel,
+                message=text,
+                session_id=session_id,
+            )
+            await job_tracker.update_job(
+                job_id,
+                status=JobStatus.RUNNING,
+                started_at=datetime.utcnow(),
+            )
+
+        # Post initial "thinking" message that we'll update with progress
+        initial_msg = await client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text="🤔 Processing your request..."
+        )
+        progress_ts = initial_msg["ts"]
+
+        # Create progress callback for streaming updates
+        async def update_progress(progress: StreamingProgress) -> None:
+            await _update_progress_message(client, channel, progress_ts, progress)
+
+            # Also record progress to job tracker
+            if job_tracker and job_id:
+                if progress.is_thinking:
+                    await job_tracker.add_progress_event(
+                        job_id, "thinking", "Thinking..."
+                    )
+                elif progress.tool_name:
+                    if progress.tool_status == "running":
+                        await job_tracker.add_progress_event(
+                            job_id, "tool_start",
+                            f"Running tool: {progress.tool_name}",
+                            tool_name=progress.tool_name
+                        )
+                    else:
+                        await job_tracker.add_progress_event(
+                            job_id, "tool_end",
+                            f"Completed tool: {progress.tool_name}",
+                            tool_name=progress.tool_name
+                        )
+
+        # Create progress callback for periodic updates
+        progress_count = 0
+
+        async def send_progress_update():
+            nonlocal progress_count
+            progress_count += 1
+            elapsed_seconds = progress_count * 30
+            if elapsed_seconds >= 60:
+                minutes = elapsed_seconds // 60
+                seconds = elapsed_seconds % 60
+                if seconds == 0:
+                    status = f"⏳ Working... ({minutes}m)"
+                else:
+                    status = f"⏳ Working... ({minutes}m {seconds}s)"
+            else:
+                status = f"⏳ Working... ({elapsed_seconds}s)"
+            try:
+                await client.chat_update(
+                    channel=channel,
+                    ts=progress_ts,
+                    text=status
+                )
+            except Exception as e:
+                logger.debug("Failed to update progress: %s", e)
+
+            # Record time progress in job tracker
+            if job_tracker and job_id:
+                await job_tracker.add_progress_event(
+                    job_id, "progress", status
+                )
+
+        # Send initial progress update immediately
+        await send_progress_update()
+
         try:
-            response = await invoke_claude(
+            # Use streaming version with progress callback
+            response = await invoke_claude_streaming(
                 prompt=text,
                 workspace=settings.bender_workspace,
                 session_id=session_id,
                 model=settings.anthropic_model,
+                timeout=settings.claude_timeout,
+                progress_callback=update_progress,
+                update_interval=5.0,
             )
             logger.info("Claude Code response received (length=%d)", len(response.result))
+
+            # Delete progress message
+            try:
+                await client.chat_delete(channel=channel, ts=progress_ts)
+            except Exception:
+                pass  # Ignore if can't delete
 
             if not response.result or not response.result.strip():
                 logger.warning("Claude Code returned empty response")
                 await say(text="I received your message but got an empty response. Please try again.", thread_ts=thread_ts)
+                # Update job as completed (empty result)
+                if job_tracker and job_id:
+                    await job_tracker.update_job(
+                        job_id,
+                        status=JobStatus.COMPLETED,
+                        completed_at=datetime.utcnow(),
+                        result="",
+                    )
                 return
 
-            await _post_response(say, response.result, thread_ts)
+            await _post_response(client, channel, say, response.result, thread_ts)
+
+            # Update job as completed
+            if job_tracker and job_id:
+                await job_tracker.update_job(
+                    job_id,
+                    status=JobStatus.COMPLETED,
+                    completed_at=datetime.utcnow(),
+                    result=response.result[:5000],  # Limit result size
+                )
+                # Scan for new git commits
+                try:
+                    await job_tracker.scan_new_commits(
+                        settings.bender_workspace,
+                        job_id,
+                        datetime.utcnow(),
+                    )
+                except Exception as e:
+                    logger.debug("Failed to scan commits: %s", e)
         except ClaudeCodeError as exc:
             logger.error("Claude Code invocation failed: %s", exc)
-            await say(text=f"Sorry, something went wrong: {exc}", thread_ts=thread_ts)
+            # Update progress message with error
+            try:
+                await client.chat_update(
+                    channel=channel,
+                    ts=progress_ts,
+                    text=f"❌ Error: {exc}"
+                )
+            except Exception:
+                await say(text=f"Sorry, something went wrong: {exc}", thread_ts=thread_ts)
+            # Update job as failed
+            if job_tracker and job_id:
+                await job_tracker.update_job(
+                    job_id,
+                    status=JobStatus.FAILED,
+                    completed_at=datetime.utcnow(),
+                    error=str(exc),
+                )
+        except Exception as exc:
+            logger.error("Unexpected error: %s", exc)
+            try:
+                await client.chat_update(
+                    channel=channel,
+                    ts=progress_ts,
+                    text=f"❌ Unexpected error: {exc}"
+                )
+            except Exception:
+                await say(text=f"Sorry, an unexpected error occurred: {exc}", thread_ts=thread_ts)
+            # Update job as failed
+            if job_tracker and job_id:
+                await job_tracker.update_job(
+                    job_id,
+                    status=JobStatus.FAILED,
+                    completed_at=datetime.utcnow(),
+                    error=str(exc),
+                )
 
     @app.event("message")
-    async def handle_message(event: dict, say) -> None:
+    async def handle_message(event: dict, say, client: AsyncWebClient) -> None:
         """Handle thread replies — resume existing session if one exists."""
         # Ignore bot messages to avoid loops
         if event.get("bot_id") or event.get("subtype"):
@@ -84,25 +244,176 @@ def register_handlers(app: AsyncApp, settings: Settings, sessions: SessionManage
         channel = event.get("channel", "")
         logger.info("Thread reply in channel=%s thread=%s", channel, thread_ts)
 
+        # Create job tracking record
+        job_id = None
+        if job_tracker:
+            job_id = await job_tracker.create_job(
+                thread_ts=thread_ts,
+                channel=channel,
+                message=text,
+                session_id=session_id,
+            )
+            await job_tracker.update_job(
+                job_id,
+                status=JobStatus.RUNNING,
+                started_at=datetime.utcnow(),
+            )
+
+        # Post initial "thinking" message that we'll update with progress
+        initial_msg = await client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text="🤔 Processing your request..."
+        )
+        progress_ts = initial_msg["ts"]
+
+        # Create progress callback for streaming updates
+        async def update_progress(progress: StreamingProgress) -> None:
+            await _update_progress_message(client, channel, progress_ts, progress)
+
+            # Also record progress to job tracker
+            if job_tracker and job_id:
+                if progress.is_thinking:
+                    await job_tracker.add_progress_event(
+                        job_id, "thinking", "Thinking..."
+                    )
+                elif progress.tool_name:
+                    if progress.tool_status == "running":
+                        await job_tracker.add_progress_event(
+                            job_id, "tool_start",
+                            f"Running tool: {progress.tool_name}",
+                            tool_name=progress.tool_name
+                        )
+                    else:
+                        await job_tracker.add_progress_event(
+                            job_id, "tool_end",
+                            f"Completed tool: {progress.tool_name}",
+                            tool_name=progress.tool_name
+                        )
+
+        # Create progress callback for periodic updates
+        progress_count = 0
+
+        async def send_progress_update():
+            nonlocal progress_count
+            progress_count += 1
+            elapsed_seconds = progress_count * 30
+            if elapsed_seconds >= 60:
+                minutes = elapsed_seconds // 60
+                seconds = elapsed_seconds % 60
+                if seconds == 0:
+                    status = f"⏳ Working... ({minutes}m)"
+                else:
+                    status = f"⏳ Working... ({minutes}m {seconds}s)"
+            else:
+                status = f"⏳ Working... ({elapsed_seconds}s)"
+            try:
+                await client.chat_update(
+                    channel=channel,
+                    ts=progress_ts,
+                    text=status
+                )
+            except Exception as e:
+                logger.debug("Failed to update progress: %s", e)
+
+            # Record time progress in job tracker
+            if job_tracker and job_id:
+                await job_tracker.add_progress_event(
+                    job_id, "progress", status
+                )
+
+        # Send initial progress update immediately
+        await send_progress_update()
+
         try:
-            response = await invoke_claude(
+            # Use streaming version with progress callback
+            response = await invoke_claude_streaming(
                 prompt=text,
                 workspace=settings.bender_workspace,
                 session_id=session_id,
                 resume=True,
                 model=settings.anthropic_model,
+                timeout=settings.claude_timeout,
+                progress_callback=update_progress,
+                update_interval=5.0,
             )
             logger.info("Claude Code response received (length=%d)", len(response.result))
+
+            # Delete progress message
+            try:
+                await client.chat_delete(channel=channel, ts=progress_ts)
+            except Exception:
+                pass  # Ignore if can't delete
 
             if not response.result or not response.result.strip():
                 logger.warning("Claude Code returned empty response")
                 await say(text="I received your message but got an empty response. Please try again.", thread_ts=thread_ts)
+                # Update job as completed (empty result)
+                if job_tracker and job_id:
+                    await job_tracker.update_job(
+                        job_id,
+                        status=JobStatus.COMPLETED,
+                        completed_at=datetime.utcnow(),
+                        result="",
+                    )
                 return
 
-            await _post_response(say, response.result, thread_ts)
+            await _post_response(client, channel, say, response.result, thread_ts)
+
+            # Update job as completed
+            if job_tracker and job_id:
+                await job_tracker.update_job(
+                    job_id,
+                    status=JobStatus.COMPLETED,
+                    completed_at=datetime.utcnow(),
+                    result=response.result[:5000],  # Limit result size
+                )
+                # Scan for new git commits
+                try:
+                    await job_tracker.scan_new_commits(
+                        settings.bender_workspace,
+                        job_id,
+                        datetime.utcnow(),
+                    )
+                except Exception as e:
+                    logger.debug("Failed to scan commits: %s", e)
         except ClaudeCodeError as exc:
             logger.error("Claude Code invocation failed: %s", exc)
-            await say(text=f"Sorry, something went wrong: {exc}", thread_ts=thread_ts)
+            # Update progress message with error
+            try:
+                await client.chat_update(
+                    channel=channel,
+                    ts=progress_ts,
+                    text=f"❌ Error: {exc}"
+                )
+            except Exception:
+                await say(text=f"Sorry, something went wrong: {exc}", thread_ts=thread_ts)
+            # Update job as failed
+            if job_tracker and job_id:
+                await job_tracker.update_job(
+                    job_id,
+                    status=JobStatus.FAILED,
+                    completed_at=datetime.utcnow(),
+                    error=str(exc),
+                )
+        except Exception as exc:
+            logger.error("Unexpected error: %s", exc)
+            try:
+                await client.chat_update(
+                    channel=channel,
+                    ts=progress_ts,
+                    text=f"❌ Unexpected error: {exc}"
+                )
+            except Exception:
+                await say(text=f"Sorry, an unexpected error occurred: {exc}", thread_ts=thread_ts)
+            # Update job as failed
+            if job_tracker and job_id:
+                await job_tracker.update_job(
+                    job_id,
+                    status=JobStatus.FAILED,
+                    completed_at=datetime.utcnow(),
+                    error=str(exc),
+                )
 
 
 def _strip_mention(text: str) -> str:
@@ -110,9 +421,74 @@ def _strip_mention(text: str) -> str:
     return re.sub(r"<@[UBW][A-Z0-9]+>", "", text).strip()
 
 
-async def _post_response(say, text: str, thread_ts: str) -> None:
-    """Post a response in the thread, splitting if it exceeds Slack's limit."""
+async def _update_progress_message(
+    client: AsyncWebClient,
+    channel: str,
+    ts: str,
+    progress: StreamingProgress
+) -> None:
+    """Update the progress message in Slack with current status."""
+    # Build status message
+    if progress.is_thinking:
+        status = "🧠 Thinking..."
+    elif progress.tool_name:
+        tool_emoji = "🔧"
+        if "read" in progress.tool_name.lower():
+            tool_emoji = "📖"
+        elif "write" in progress.tool_name.lower() or "edit" in progress.tool_name.lower():
+            tool_emoji = "✏️"
+        elif "bash" in progress.tool_name.lower() or "command" in progress.tool_name.lower():
+            tool_emoji = "💻"
+        elif "search" in progress.tool_name.lower() or "grep" in progress.tool_name.lower():
+            tool_emoji = "🔍"
+
+        if progress.tool_status == "running":
+            status = f"{tool_emoji} Running: `{progress.tool_name}`..."
+        else:
+            status = f"✅ Completed: `{progress.tool_name}`"
+    else:
+        status = "⏳ Working..."
+
+    try:
+        await client.chat_update(
+            channel=channel,
+            ts=ts,
+            text=status
+        )
+    except Exception as e:
+        logger.debug("Failed to update progress message: %s", e)
+
+
+async def _post_response(client, channel, say, text: str, thread_ts: str) -> None:
+    """Post a response in the thread, splitting if it exceeds Slack's limit or uploading as file."""
     text = md_to_mrkdwn(text)
+
+    # For very long responses, upload as a file instead
+    if len(text) > LONG_RESPONSE_THRESHOLD:
+        logger.info("Response too long (%d chars), uploading as file", len(text))
+        try:
+            # Create a temporary file with the response
+            file_path = create_temp_file(text, "claude-response")
+
+            # Upload file to Slack
+            await client.files_upload_v2(
+                channel=channel,
+                thread_ts=thread_ts,
+                file=str(file_path),
+                initial_comment="Response too long, here it is as a file:"
+            )
+            logger.info("File uploaded successfully")
+            return
+        except Exception as e:
+            logger.error("Failed to upload file: %s", e)
+            # Fall back to splitting the message
+            text = text[:LONG_RESPONSE_THRESHOLD] + "\n\n[Response truncated. Full response uploaded as file failed.]"
+
+    # Safety limit: if text is extremely long, truncate it
+    MAX_TOTAL_LENGTH = 50000
+    if len(text) > MAX_TOTAL_LENGTH:
+        logger.warning("Response too long (%d chars), truncating", len(text))
+        text = text[:MAX_TOTAL_LENGTH] + "\n\n[Response truncated due to length]"
 
     if len(text) <= SLACK_MSG_LIMIT:
         await say(text=text, thread_ts=thread_ts)

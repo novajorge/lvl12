@@ -20,7 +20,17 @@
       "Bash(echo:*)",
       "Bash(python -c:*)",
       "Bash(python:*)",
-      "Bash(where:*)"
+      "Bash(where:*)",
+      "Bash(unset:*)",
+      "Bash(claude --print --output-format json:*)",
+      "Bash(claude:*)",
+      "Bash(/c/Python313/python.exe -m pip show:*)",
+      "Bash(/c/Python313/python.exe -m pip:*)",
+      "WebSearch",
+      "Bash(timeout:*)",
+      "Bash(/c/Python313/python.exe -c:*)",
+      "Bash(python3 -c:*)",
+      "mcp__ide__getDiagnostics"
     ]
   }
 }
