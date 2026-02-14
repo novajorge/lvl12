@@ -31,6 +31,8 @@ async def main() -> None:
                 os.environ["OLLAMA_MODEL"] = model
             elif api_mode == "minimax":
                 os.environ["MINIMAX_MODEL"] = model
+            elif api_mode == "nvidia":
+                os.environ["NVIDIA_MODEL"] = model
             else:
                 os.environ["ANTHROPIC_MODEL"] = model
 

@@ -90,6 +90,10 @@ def prompt_api_mode() -> tuple[str, str | None]:
     if minimax_models:
         providers.append(("minimax", f"MiniMax API - {len(minimax_models)} models"))
 
+    nvidia_models = _get_available_models("NVIDIA")
+    if nvidia_models:
+        providers.append(("nvidia", f"NVIDIA Build API - {len(nvidia_models)} models"))
+
     if not providers:
         providers.append(("claude", "Claude API (Anthropic Cloud - default)"))
 
@@ -131,6 +135,14 @@ def prompt_api_mode() -> tuple[str, str | None]:
         setup_info = [
             "   - API key configured: ANTHROPIC_API_KEY",
             "   - Base URL set: ANTHROPIC_BASE_URL",
+        ]
+    elif api_mode == "nvidia":
+        models = nvidia_models
+        provider_name = "NVIDIA Build"
+        setup_info = [
+            "   - API key from: https://build.nvidia.com/settings/api-keys",
+            "   - Set ANTHROPIC_API_KEY to your NVIDIA API key",
+            "   - Set ANTHROPIC_BASE_URL=https://integrate.api.nvidia.com/v1",
         ]
     else:
         models = {}

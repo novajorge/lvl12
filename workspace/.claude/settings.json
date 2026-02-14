@@ -17,6 +17,7 @@
       "Bash(git add *)",
       "Bash(git commit *)",
       "Bash(git log*)",
+      "Bash(git push*)",
       "Bash(ls *)",
       "Bash(cat *)",
       "Bash(mkdir *)",

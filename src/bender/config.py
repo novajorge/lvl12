@@ -53,6 +53,7 @@ class Settings(BaseSettings):
             model = (
                 os.getenv("OLLAMA_MODEL")
                 or os.getenv("MINIMAX_MODEL")
+                or os.getenv("NVIDIA_MODEL")
                 or os.getenv("ANTHROPIC_MODEL")
             )
             if model:

@@ -18,7 +18,9 @@
       "Bash(git branch:*)",
       "Bash(git push:*)",
       "Bash(echo:*)",
-      "Bash(python -c:*)"
+      "Bash(python -c:*)",
+      "Bash(python:*)",
+      "Bash(where:*)"
     ]
   }
 }
