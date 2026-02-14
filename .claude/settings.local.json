@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where claude)",
+      "Bash(export CLAUDE_CODE_OAUTH_TOKEN=\"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\")",
+      "Bash(npm config:*)",
+      "Bash(where.exe:*)",
+      "Bash(test:*)",
+      "Bash(npm create:*)",
+      "Bash(npx tailwindcss:*)",
+      "Bash(node_modules/.bin/tailwindcss init:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(git init:*)",
+      "Bash(git remote add:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(echo:*)",
+      "Bash(python -c:*)"
+    ]
+  }
+}

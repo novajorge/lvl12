@@ -1,8 +1,26 @@
 {
   "permissions": {
     "allow": [
+      "Write",
+      "Edit",
       "Bash(curl *)",
-      "Bash(jq *)"
+      "Bash(jq *)",
+      "Bash(kubectl get *)",
+      "Bash(kubectl logs *)",
+      "Bash(kubectl rollout status *)",
+      "Bash(npm install*)",
+      "Bash(npm run *)",
+      "Bash(npx *)",
+      "Bash(node *)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git log*)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(mkdir *)",
+      "Bash(touch *)"
     ]
   }
 }
