@@ -465,6 +465,30 @@ class JobTracker:
             List of commit dictionaries.
         """
         import subprocess
+        import re
+
+        # Get remote URL to construct GitHub link
+        project_name = workspace.name
+        commit_link = None
+
+        try:
+            remote_result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if remote_result.returncode == 0:
+                remote_url = remote_result.stdout.strip()
+                # Convert git@github.com:user/repo.git to https://github.com/user/repo
+                match = re.match(r"git@github\.com:([^/]+)/(.+?)(?:\.git)?$", remote_url)
+                if match:
+                    owner, repo = match.groups()
+                    project_name = repo
+                    commit_link = f"https://github.com/{owner}/{repo}/commit"
+        except Exception as e:
+            logger.debug("Failed to get git remote: %s", e)
 
         try:
             result = subprocess.run(
@@ -485,14 +509,18 @@ class JobTracker:
                     continue
                 parts = line.split("|", 4)
                 if len(parts) >= 5:
-                    commits.append({
+                    commit = {
                         "hash": parts[0],
                         "short_hash": parts[0][:8],
                         "author": parts[1],
                         "email": parts[2],
                         "timestamp": int(parts[3]),
                         "message": parts[4],
-                    })
+                        "project": project_name,
+                    }
+                    if commit_link:
+                        commit["link"] = f"{commit_link}/{parts[0]}"
+                    commits.append(commit)
 
             return commits
         except Exception as e:

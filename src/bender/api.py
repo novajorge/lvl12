@@ -75,13 +75,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         .console-line.error { color: #ff4757; }
         .console-time { color: #555; margin-right: 8px; }
         .commits-list { background: #16213e; border-radius: 8px; overflow: hidden; }
-        .commit-item { padding: 12px 15px; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 15px; }
+        .commit-item { padding: 12px 15px; border-bottom: 1px solid #333; display: grid; grid-template-columns: 150px 80px 1fr 180px 150px; align-items: center; gap: 15px; }
         .commit-item:last-child { border-bottom: none; }
         .commit-item:hover { background: #1f2b4d; }
-        .commit-hash { font-family: monospace; color: #00d4ff; background: #0f0f23; padding: 3px 8px; border-radius: 4px; font-size: 12px; }
-        .commit-message { flex: 1; color: #eee; }
-        .commit-meta { color: #666; font-size: 12px; }
+        .commit-project { font-weight: 600; color: #ffd700; font-size: 12px; }
+        .commit-hash { font-family: monospace; color: #00d4ff; background: #0f0f23; padding: 3px 8px; border-radius: 4px; font-size: 12px; text-decoration: none; }
+        .commit-hash:hover { background: #1a1a2e; }
+        .commit-message { color: #eee; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .commit-meta { color: #666; font-size: 12px; display: flex; flex-direction: column; }
         .commit-author { color: #00ff88; }
+        .commit-date { font-size: 11px; }
         .skills-section { margin-top: 30px; }
         .skills-tabs { display: flex; gap: 5px; margin-bottom: 15px; border-bottom: 1px solid #333; }
         .skills-tab { padding: 10px 20px; background: transparent; border: none; color: #888; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
@@ -144,7 +147,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </table>
 
         <h2 style="color: #00d4ff; margin: 30px 0 15px;">Recent Git Commits</h2>
-        <div class="commits-list" id="commitsList"></div>
+        <div class="commits-list">
+            <div class="commit-item" style="background: #0f0f23; font-weight: 600; font-size: 11px; text-transform: uppercase; color: #00d4ff;">
+                <span>Project</span>
+                <span>SHA</span>
+                <span>Description</span>
+                <span>Author</span>
+                <span>Date/Time</span>
+            </div>
+            <div id="commitsList"></div>
+        </div>
 
         <div class="skills-section">
             <h2 style="color: #00d4ff; margin: 30px 0 15px;">Agent Configuration</h2>
@@ -470,11 +482,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
                 container.innerHTML = commits.map(c => `
                     <div class="commit-item">
-                        <span class="commit-hash">${c.short_hash}</span>
-                        <span class="commit-message">${(c.message || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</span>
+                        <span class="commit-project">${(c.project || 'Unknown').replace(/</g, '&lt;')}</span>
+                        ${c.link
+                            ? `<a href="${c.link}" target="_blank" class="commit-hash">${c.short_hash}</a>`
+                            : `<span class="commit-hash">${c.short_hash}</span>`
+                        }
+                        <span class="commit-message" title="${(c.message || '').replace(/"/g, '&quot;')}">${(c.message || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</span>
                         <span class="commit-meta">
                             <span class="commit-author">${(c.author || '').replace(/</g, '&lt;')}</span>
-                            &bull; ${new Date(c.timestamp * 1000).toLocaleDateString()}
+                            <span class="commit-date">${new Date(c.timestamp * 1000).toLocaleString()}</span>
                         </span>
                     </div>
                 `).join('');

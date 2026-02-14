@@ -298,6 +298,7 @@ async def invoke_claude_streaming(
     session_id: str | None = None,
     resume: bool = False,
     model: str | None = None,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
     progress_callback: Callable[[StreamingProgress], Awaitable[None]] | None = None,
     update_interval: float = STREAMING_UPDATE_INTERVAL,
 ) -> ClaudeResponse:
@@ -312,6 +313,7 @@ async def invoke_claude_streaming(
         session_id: Session ID for new or resumed sessions.
         resume: Whether to resume an existing session.
         model: Optional model name (for Ollama or custom Claude models).
+        timeout: Maximum execution time in seconds.
         progress_callback: Async function called with progress updates.
         update_interval: Seconds between progress callback invocations.
 
@@ -374,83 +376,106 @@ async def invoke_claude_streaming(
     try:
         # Read stdout line by line for streaming updates
         line_count = 0
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
 
-            line_str = line.decode().strip()
-            line_count += 1
+        # Set up timeout if needed
+        actual_timeout = timeout if timeout > 0 else None
+        read_task = None
 
-            if not line_str:
-                continue
+        async def read_stream():
+            nonlocal line_count
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
 
-            # Log first few lines for debugging
-            if line_count <= 5:
-                logger.debug("Stream line %d: %s", line_count, line_str[:200])
+                line_str = line.decode().strip()
+                line_count += 1
 
-            try:
-                event = json.loads(line_str)
-                event_type = event.get("type", "")
+                if not line_str:
+                    continue
 
-                # Handle different event types from stream-json
-                if event_type == "assistant":
-                    # Assistant text message
-                    message = event.get("message", {})
-                    content = message.get("content", [])
-                    for block in content:
-                        if block.get("type") == "text":
-                            progress.current_text = block.get("text", "")
+                # Log first few lines for debugging
+                if line_count <= 5:
+                    logger.debug("Stream line %d: %s", line_count, line_str[:200])
+
+                try:
+                    event = json.loads(line_str)
+                    event_type = event.get("type", "")
+
+                    # Handle different event types from stream-json
+                    if event_type == "assistant":
+                        message = event.get("message", {})
+                        content = message.get("content", [])
+                        for block in content:
+                            if block.get("type") == "text":
+                                progress.current_text = block.get("text", "")
+                                final_result = progress.current_text
+                        progress.is_thinking = False
+                        progress.tool_name = None
+                        await maybe_send_update()
+
+                    elif event_type == "content_block_delta":
+                        delta = event.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            text = delta.get("text", "")
+                            progress.current_text += text
                             final_result = progress.current_text
-                    progress.is_thinking = False
-                    progress.tool_name = None
-                    await maybe_send_update()
 
-                elif event_type == "content_block_delta":
-                    # Incremental text update
-                    delta = event.get("delta", {})
-                    if delta.get("type") == "text_delta":
-                        text = delta.get("text", "")
-                        progress.current_text += text
-                        final_result = progress.current_text
+                    elif event_type == "tool_use":
+                        tool_name = event.get("tool", {}).get("name", "unknown")
+                        progress.tool_name = tool_name
+                        progress.tool_status = "running"
+                        progress.is_thinking = False
+                        logger.debug("Tool started: %s", tool_name)
+                        await maybe_send_update(force=True)
 
-                elif event_type == "tool_use":
-                    # Tool invocation started
-                    tool_name = event.get("tool", {}).get("name", "unknown")
-                    progress.tool_name = tool_name
-                    progress.tool_status = "running"
-                    progress.is_thinking = False
-                    logger.debug("Tool started: %s", tool_name)
-                    await maybe_send_update(force=True)
+                    elif event_type == "tool_result":
+                        progress.tool_status = "completed"
+                        await maybe_send_update(force=True)
 
-                elif event_type == "tool_result":
-                    # Tool completed
-                    progress.tool_status = "completed"
-                    await maybe_send_update(force=True)
+                    elif event_type == "thinking":
+                        progress.is_thinking = True
+                        progress.tool_name = None
+                        await maybe_send_update()
 
-                elif event_type == "thinking":
-                    # Model is thinking (extended thinking)
-                    progress.is_thinking = True
-                    progress.tool_name = None
-                    await maybe_send_update()
+                    elif event_type == "result":
+                        final_result = event.get("result", final_result)
+                        returned_session_id = event.get("session_id", returned_session_id)
+                        progress.total_cost = event.get("total_cost_usd", 0.0)
 
-                elif event_type == "result":
-                    # Final result
-                    final_result = event.get("result", final_result)
-                    returned_session_id = event.get("session_id", returned_session_id)
-                    progress.total_cost = event.get("total_cost_usd", 0.0)
+                    elif event_type == "error":
+                        error_msg = event.get("error", {}).get("message", "Unknown error")
+                        raise ClaudeCodeError(f"Claude Code error: {error_msg}")
 
-                elif event_type == "error":
-                    # Error event
-                    error_msg = event.get("error", {}).get("message", "Unknown error")
-                    raise ClaudeCodeError(f"Claude Code error: {error_msg}")
+                except json.JSONDecodeError:
+                    logger.debug("Non-JSON streaming line: %s", line_str[:100])
+                except Exception as parse_err:
+                    logger.error("Error parsing streaming line: %s | Line: %s", parse_err, line_str[:200])
+                    raise
 
-            except json.JSONDecodeError as json_err:
-                # Non-JSON line, log and continue
-                logger.debug("Non-JSON streaming line: %s", line_str[:100])
-            except Exception as parse_err:
-                logger.error("Error parsing streaming line: %s | Line: %s", parse_err, line_str[:200])
-                raise
+        # Start reading with optional timeout
+        if actual_timeout:
+            read_task = asyncio.create_task(read_stream())
+            try:
+                await asyncio.wait_for(read_task, timeout=actual_timeout)
+            except asyncio.TimeoutError:
+                read_task.cancel()
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+                # Clean up session directory
+                if session_id:
+                    try:
+                        session_dir = Path.home() / ".claude" / "projects" / session_id
+                        if session_dir.exists():
+                            import shutil
+                            shutil.rmtree(session_dir)
+                            logger.info("Cleaned up timed out session: %s", session_id)
+                    except Exception as cleanup_err:
+                        logger.warning("Failed to clean up session %s: %s", session_id, cleanup_err)
+                raise ClaudeCodeError(f"Claude Code timed out after {timeout}s")
+        else:
+            await read_stream()
 
         # Wait for process to complete
         await process.wait()
