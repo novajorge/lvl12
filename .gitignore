@@ -35,3 +35,11 @@ build/
 .DS_Store
 Thumbs.db
 private
+
+# Workspace - Each project is its own git repository
+# Keep shared configuration, ignore individual projects
+workspace/*/
+!workspace/.agents/
+!workspace/.claude/
+!workspace/CLAUDE.md
+!workspace/.gitkeep

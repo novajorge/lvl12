@@ -25,7 +25,11 @@ class Settings(BaseSettings):
     # Optional: API key for authenticating external HTTP requests
     bender_api_key: str | None = None
 
-    model_config = {"case_sensitive": False}
+    model_config = {
+        "case_sensitive": False,
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+    }
 
     def validate_auth(self) -> None:
         """Ensure at least one Claude Code authentication method is configured."""

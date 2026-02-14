@@ -47,6 +47,13 @@ def register_handlers(app: AsyncApp, settings: Settings, sessions: SessionManage
                 workspace=settings.bender_workspace,
                 session_id=session_id,
             )
+            logger.info("Claude Code response received (length=%d)", len(response.result))
+
+            if not response.result or not response.result.strip():
+                logger.warning("Claude Code returned empty response")
+                await say(text="I received your message but got an empty response. Please try again.", thread_ts=thread_ts)
+                return
+
             await _post_response(say, response.result, thread_ts)
         except ClaudeCodeError as exc:
             logger.error("Claude Code invocation failed: %s", exc)
@@ -83,6 +90,13 @@ def register_handlers(app: AsyncApp, settings: Settings, sessions: SessionManage
                 session_id=session_id,
                 resume=True,
             )
+            logger.info("Claude Code response received (length=%d)", len(response.result))
+
+            if not response.result or not response.result.strip():
+                logger.warning("Claude Code returned empty response")
+                await say(text="I received your message but got an empty response. Please try again.", thread_ts=thread_ts)
+                return
+
             await _post_response(say, response.result, thread_ts)
         except ClaudeCodeError as exc:
             logger.error("Claude Code invocation failed: %s", exc)
