@@ -8,11 +8,11 @@ from datetime import datetime
 from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
-from bender.claude_code import ClaudeCodeError, invoke_claude, invoke_claude_streaming, StreamingProgress
+from bender.claude_code import ClaudeCodeError, invoke_claude, StreamingProgress
 from bender.config import Settings
 from bender.job_tracker import JobTracker, JobStatus
 from bender.session_manager import SessionManager
-from bender.slack_utils import SLACK_MSG_LIMIT, LONG_RESPONSE_THRESHOLD, md_to_mrkdwn, split_text, create_temp_file
+from bender.slack_utils import SLACK_MSG_LIMIT, LONG_RESPONSE_THRESHOLD, md_to_mrkdwn, split_text, create_temp_file, process_urls_in_text
 
 logger = logging.getLogger(__name__)
 
@@ -46,24 +46,42 @@ def register_handlers(
             await say(text="How can I help?", thread_ts=thread_ts)
             return
 
+        # Process URLs in text to provide context to Claude
+        text = await process_urls_in_text(text)
+
         logger.info("New mention in channel=%s thread=%s", channel, thread_ts)
 
-        session_id = await sessions.create_session(thread_ts)
+        # Check if session already exists for this thread
+        session_id = await sessions.get_session(thread_ts)
+        if not session_id:
+            session_id = await sessions.create_session(thread_ts)
 
         # Create job tracking record
         job_id = None
+        existing_job = None
         if job_tracker:
-            job_id = await job_tracker.create_job(
-                thread_ts=thread_ts,
-                channel=channel,
-                message=text,
-                session_id=session_id,
-            )
-            await job_tracker.update_job(
-                job_id,
-                status=JobStatus.RUNNING,
-                started_at=datetime.utcnow(),
-            )
+            existing_job = await job_tracker.get_job_by_thread(thread_ts)
+            if existing_job:
+                # Reuse existing job for this thread (continuing conversation)
+                job_id = existing_job["id"]
+                logger.info("Resuming existing job %s for thread %s", job_id, thread_ts)
+                await job_tracker.update_job(
+                    job_id,
+                    status=JobStatus.RUNNING,
+                    started_at=datetime.utcnow(),
+                )
+            else:
+                job_id = await job_tracker.create_job(
+                    thread_ts=thread_ts,
+                    channel=channel,
+                    message=text,
+                    session_id=session_id,
+                )
+                await job_tracker.update_job(
+                    job_id,
+                    status=JobStatus.RUNNING,
+                    started_at=datetime.utcnow(),
+                )
 
         # Post initial "thinking" message that we'll update with progress
         initial_msg = await client.chat_postMessage(
@@ -132,16 +150,15 @@ def register_handlers(
         await send_progress_update()
 
         try:
-            # Use streaming version with progress callback
-            response = await invoke_claude_streaming(
-                prompt=text,
-                workspace=settings.bender_workspace,
-                session_id=session_id,
-                model=settings.anthropic_model,
-                timeout=settings.claude_timeout,
-                progress_callback=update_progress,
-                update_interval=5.0,
-            )
+            # Use non-streaming version (more reliable)
+            response = await invoke_claude(
+                    prompt=text,
+                    workspace=settings.bender_workspace,
+                    session_id=session_id,
+                    model=settings.anthropic_model,
+                    timeout=settings.claude_timeout,
+                )
+
             logger.info("Claude Code response received (length=%d)", len(response.result))
 
             # Delete progress message
@@ -167,12 +184,28 @@ def register_handlers(
 
             # Update job as completed
             if job_tracker and job_id:
-                await job_tracker.update_job(
-                    job_id,
-                    status=JobStatus.COMPLETED,
-                    completed_at=datetime.utcnow(),
-                    result=response.result[:5000],  # Limit result size
-                )
+                # If existing job, append to result; otherwise set result
+                if existing_job:
+                    await job_tracker.append_to_result(job_id, response.result[:5000])
+                    # Also update token stats for this turn
+                    await job_tracker.update_job(
+                        job_id,
+                        status=JobStatus.COMPLETED,
+                        completed_at=datetime.utcnow(),
+                        input_tokens=getattr(response, 'input_tokens', 0) or 0,
+                        output_tokens=getattr(response, 'output_tokens', 0) or 0,
+                        total_cost_usd=getattr(response, 'total_cost', 0) or 0,
+                    )
+                else:
+                    await job_tracker.update_job(
+                        job_id,
+                        status=JobStatus.COMPLETED,
+                        completed_at=datetime.utcnow(),
+                        result=response.result[:5000],
+                        input_tokens=getattr(response, 'input_tokens', 0) or 0,
+                        output_tokens=getattr(response, 'output_tokens', 0) or 0,
+                        total_cost_usd=getattr(response, 'total_cost', 0) or 0,
+                    )
                 # Scan for new git commits
                 try:
                     await job_tracker.scan_new_commits(
@@ -241,23 +274,42 @@ def register_handlers(
         if not text.strip():
             return
 
+        # Process URLs in text to provide context to Claude
+        text = await process_urls_in_text(text)
+
         channel = event.get("channel", "")
         logger.info("Thread reply in channel=%s thread=%s", channel, thread_ts)
 
-        # Create job tracking record
+        # Check if job already exists for this thread
         job_id = None
+        existing_job = None
         if job_tracker:
-            job_id = await job_tracker.create_job(
-                thread_ts=thread_ts,
-                channel=channel,
-                message=text,
-                session_id=session_id,
-            )
-            await job_tracker.update_job(
-                job_id,
-                status=JobStatus.RUNNING,
-                started_at=datetime.utcnow(),
-            )
+            existing_job = await job_tracker.get_job_by_thread(thread_ts)
+
+        if existing_job:
+            # Reuse existing job for this thread (continuing conversation)
+            job_id = existing_job["id"]
+            logger.info("Resuming existing job %s for thread %s", job_id, thread_ts)
+            if job_tracker:
+                await job_tracker.update_job(
+                    job_id,
+                    status=JobStatus.RUNNING,
+                    started_at=datetime.utcnow(),
+                )
+        else:
+            # Create new job for this thread
+            if job_tracker:
+                job_id = await job_tracker.create_job(
+                    thread_ts=thread_ts,
+                    channel=channel,
+                    message=text,
+                    session_id=session_id,
+                )
+                await job_tracker.update_job(
+                    job_id,
+                    status=JobStatus.RUNNING,
+                    started_at=datetime.utcnow(),
+                )
 
         # Post initial "thinking" message that we'll update with progress
         initial_msg = await client.chat_postMessage(
@@ -326,16 +378,14 @@ def register_handlers(
         await send_progress_update()
 
         try:
-            # Use streaming version with progress callback
-            response = await invoke_claude_streaming(
+            # Use non-streaming version (more reliable)
+            response = await invoke_claude(
                 prompt=text,
                 workspace=settings.bender_workspace,
                 session_id=session_id,
                 resume=True,
                 model=settings.anthropic_model,
                 timeout=settings.claude_timeout,
-                progress_callback=update_progress,
-                update_interval=5.0,
             )
             logger.info("Claude Code response received (length=%d)", len(response.result))
 
@@ -362,12 +412,28 @@ def register_handlers(
 
             # Update job as completed
             if job_tracker and job_id:
-                await job_tracker.update_job(
-                    job_id,
-                    status=JobStatus.COMPLETED,
-                    completed_at=datetime.utcnow(),
-                    result=response.result[:5000],  # Limit result size
-                )
+                # If existing job, append to result; otherwise set result
+                if existing_job:
+                    await job_tracker.append_to_result(job_id, response.result[:5000])
+                    # Also update token stats for this turn
+                    await job_tracker.update_job(
+                        job_id,
+                        status=JobStatus.COMPLETED,
+                        completed_at=datetime.utcnow(),
+                        input_tokens=getattr(response, 'input_tokens', 0) or 0,
+                        output_tokens=getattr(response, 'output_tokens', 0) or 0,
+                        total_cost_usd=getattr(response, 'total_cost', 0) or 0,
+                    )
+                else:
+                    await job_tracker.update_job(
+                        job_id,
+                        status=JobStatus.COMPLETED,
+                        completed_at=datetime.utcnow(),
+                        result=response.result[:5000],
+                        input_tokens=getattr(response, 'input_tokens', 0) or 0,
+                        output_tokens=getattr(response, 'output_tokens', 0) or 0,
+                        total_cost_usd=getattr(response, 'total_cost', 0) or 0,
+                    )
                 # Scan for new git commits
                 try:
                     await job_tracker.scan_new_commits(
@@ -414,6 +480,29 @@ def register_handlers(
                     completed_at=datetime.utcnow(),
                     error=str(exc),
                 )
+
+    @app.command("/abort")
+    async def handle_abort_command(ack, respond, command) -> None:
+        """Handle /abort command to abort a session."""
+        await ack()
+
+        # Extract thread_ts from command (should be in thread)
+        thread_ts = command.get("thread_ts")
+        if not thread_ts:
+            await respond("This command must be used in a thread.")
+            return
+
+        # Try to abort the session
+        session_id = await sessions.get_session(thread_ts)
+        if not session_id:
+            await respond("No active session found for this thread.")
+            return
+
+        success = await sessions.abort_session(thread_ts)
+        if success:
+            await respond(f"Session aborted successfully.")
+        else:
+            await respond("Failed to abort session.")
 
 
 def _strip_mention(text: str) -> str:

@@ -30,7 +30,8 @@
       "Bash(timeout:*)",
       "Bash(/c/Python313/python.exe -c:*)",
       "Bash(python3 -c:*)",
-      "mcp__ide__getDiagnostics"
+      "mcp__ide__getDiagnostics",
+      "Bash(curl:*)"
     ]
   }
 }

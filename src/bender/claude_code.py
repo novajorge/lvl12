@@ -70,6 +70,9 @@ class ClaudeResponse:
     result: str
     session_id: str
     is_error: bool = False
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_cost: float = 0.0
 
 
 @dataclass
@@ -81,6 +84,8 @@ class StreamingProgress:
     tool_status: str | None = None  # "running", "completed", "error"
     is_thinking: bool = False
     total_cost: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class ClaudeCodeError(Exception):
@@ -228,6 +233,9 @@ def _parse_response(raw_output: str, session_id: str) -> ClaudeResponse:
             final_result = ""
             returned_session_id = session_id
             is_error = False
+            input_tokens = 0
+            output_tokens = 0
+            total_cost = 0.0
 
             for event in data:
                 if isinstance(event, dict):
@@ -237,6 +245,9 @@ def _parse_response(raw_output: str, session_id: str) -> ClaudeResponse:
                         final_result = event.get("result", "")
                         returned_session_id = event.get("session_id", returned_session_id)
                         is_error = event.get("is_error", False)
+                        input_tokens = event.get("input_tokens", 0) or 0
+                        output_tokens = event.get("output_tokens", 0) or 0
+                        total_cost = event.get("total_cost_usd", 0.0) or 0.0
                     # Also check for success subtype
                     elif event.get("subtype") == "success":
                         final_result = event.get("result", final_result)
@@ -247,6 +258,9 @@ def _parse_response(raw_output: str, session_id: str) -> ClaudeResponse:
                     result=final_result,
                     session_id=returned_session_id,
                     is_error=is_error,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_cost=total_cost,
                 )
 
             # If no result found in events, extract text from assistant messages
@@ -281,14 +295,20 @@ def _parse_response(raw_output: str, session_id: str) -> ClaudeResponse:
     result = data.get("result", raw_output.strip())
     returned_session_id = data.get("session_id", session_id)
     is_error = data.get("is_error", False)
+    input_tokens = data.get("input_tokens", 0) or 0
+    output_tokens = data.get("output_tokens", 0) or 0
+    total_cost = data.get("total_cost_usd", 0.0) or 0.0
 
-    logger.debug("Parsed result length: %d, session_id: %s, is_error: %s",
-                 len(result) if result else 0, returned_session_id, is_error)
+    logger.debug("Parsed result length: %d, session_id: %s, is_error: %s, input_tokens: %d, output_tokens: %d",
+                 len(result) if result else 0, returned_session_id, is_error, input_tokens, output_tokens)
 
     return ClaudeResponse(
         result=result,
         session_id=returned_session_id,
         is_error=is_error,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_cost=total_cost,
     )
 
 
@@ -362,6 +382,27 @@ async def invoke_claude_streaming(
     final_result = ""
     returned_session_id = session_id or ""
     last_update_time = asyncio.get_event_loop().time()
+    last_stderr_time = asyncio.get_event_loop().time()
+
+    # Callback for terminal-like output (from stderr)
+    async def on_stderr_line(line: str) -> None:
+        """Handle stderr line for terminal-like output."""
+        nonlocal last_stderr_time
+        # Always log stderr for debugging
+        logger.debug("Stderr line: %s", line[:100])
+
+        if progress_callback is None:
+            return
+
+        # Rate limit updates to avoid flooding the UI
+        current_time = asyncio.get_event_loop().time()
+        if current_time - last_stderr_time >= 1.5:  # Every 1.5 seconds max
+            # Create a terminal-like progress update with the actual stderr line
+            progress.tool_name = None
+            progress.tool_status = None
+            progress.current_text = f"$ {line[:100]}"
+            await progress_callback(progress)
+            last_stderr_time = current_time
 
     async def maybe_send_update(force: bool = False) -> None:
         """Send progress update if enough time has passed."""
@@ -398,6 +439,7 @@ async def invoke_claude_streaming(
                 if line_count <= 5:
                     logger.debug("Stream line %d: %s", line_count, line_str[:200])
 
+                # Wrap ALL parsing in a single try-except to never break the stream
                 try:
                     event = json.loads(line_str)
                     event_type = event.get("type", "")
@@ -442,24 +484,38 @@ async def invoke_claude_streaming(
                         final_result = event.get("result", final_result)
                         returned_session_id = event.get("session_id", returned_session_id)
                         progress.total_cost = event.get("total_cost_usd", 0.0)
+                        progress.input_tokens = event.get("input_tokens", 0)
+                        progress.output_tokens = event.get("output_tokens", 0)
 
                     elif event_type == "error":
                         error_msg = event.get("error", {}).get("message", "Unknown error")
                         raise ClaudeCodeError(f"Claude Code error: {error_msg}")
 
-                except json.JSONDecodeError:
-                    logger.debug("Non-JSON streaming line: %s", line_str[:100])
-                except Exception as parse_err:
-                    logger.error("Error parsing streaming line: %s | Line: %s", parse_err, line_str[:200])
-                    raise
+                except Exception as e:
+                    # NEVER break the stream - just log and continue
+                    logger.debug("Stream parse issue (continuing): %s | Line: %s", str(e)[:50], line_str[:50])
 
-        # Start reading with optional timeout
+        # Start reading stdout and stderr in parallel
+        async def read_stderr():
+            """Read stderr for terminal-like output."""
+            while True:
+                line = await process.stderr.readline()
+                if not line:
+                    break
+                line_str = line.decode().strip()
+                if line_str:
+                    logger.debug("Stderr: %s", line_str[:100])
+                    await on_stderr_line(line_str)
+
+        # Start both readers
         if actual_timeout:
-            read_task = asyncio.create_task(read_stream())
+            stdout_task = asyncio.create_task(read_stream())
+            stderr_task = asyncio.create_task(read_stderr())
             try:
-                await asyncio.wait_for(read_task, timeout=actual_timeout)
+                await asyncio.wait_for(stdout_task, timeout=actual_timeout)
             except asyncio.TimeoutError:
-                read_task.cancel()
+                stdout_task.cancel()
+                stderr_task.cancel()
                 if process.returncode is None:
                     process.kill()
                     await process.wait()
@@ -474,8 +530,15 @@ async def invoke_claude_streaming(
                     except Exception as cleanup_err:
                         logger.warning("Failed to clean up session %s: %s", session_id, cleanup_err)
                 raise ClaudeCodeError(f"Claude Code timed out after {timeout}s")
+            # Wait for stderr to finish too
+            await stderr_task
         else:
-            await read_stream()
+            # Run both in parallel without timeout
+            await asyncio.gather(
+                read_stream(),
+                read_stderr(),
+                return_exceptions=True
+            )
 
         # Wait for process to complete
         await process.wait()
@@ -499,6 +562,9 @@ async def invoke_claude_streaming(
             result=final_result,
             session_id=returned_session_id,
             is_error=False,
+            input_tokens=progress.input_tokens,
+            output_tokens=progress.output_tokens,
+            total_cost=progress.total_cost,
         )
 
     except Exception as exc:

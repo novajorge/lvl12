@@ -227,6 +227,51 @@ class JobTracker:
                 row = await cursor.fetchone()
                 return dict(row) if row else None
 
+    async def get_job_by_thread(self, thread_ts: str) -> dict[str, Any] | None:
+        """Get a job by thread timestamp.
+
+        Args:
+            thread_ts: The Slack thread timestamp.
+
+        Returns:
+            Job data as a dictionary, or None if not found.
+        """
+        await self._ensure_initialized()
+
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM jobs WHERE thread_ts = ? ORDER BY created_at DESC LIMIT 1",
+                (thread_ts,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+
+    async def append_to_result(self, job_id: str, new_result: str) -> None:
+        """Append to existing job result (for multi-turn conversations).
+
+        Args:
+            job_id: The job ID.
+            new_result: Additional result text to append.
+        """
+        await self._ensure_initialized()
+
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT result FROM jobs WHERE id = ?",
+                (job_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    existing = row[0] or ""
+                    updated = existing + "\n\n---\n\n" + new_result
+                    await db.execute(
+                        "UPDATE jobs SET result = ? WHERE id = ?",
+                        (updated, job_id),
+                    )
+                    await db.commit()
+
     async def get_all_jobs(
         self,
         status: str | None = None,
@@ -491,8 +536,9 @@ class JobTracker:
             logger.debug("Failed to get git remote: %s", e)
 
         try:
+            # Use null byte as separator to avoid issues with pipes in commit messages
             result = subprocess.run(
-                ["git", "log", f"-{limit}", "--pretty=format:%H|%an|%ae|%at|%s"],
+                ["git", "log", f"-{limit}", "--pretty=format:%H%x00%an%x00%ae%x00%at%x00%s"],
                 cwd=workspace,
                 capture_output=True,
                 text=True,
@@ -507,7 +553,7 @@ class JobTracker:
             for line in result.stdout.strip().split("\n"):
                 if not line:
                     continue
-                parts = line.split("|", 4)
+                parts = line.split("\x00")
                 if len(parts) >= 5:
                     commit = {
                         "hash": parts[0],

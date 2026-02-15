@@ -8,6 +8,24 @@
 - **Communication language:** Español (código y documentación técnica en inglés)
 - **Primary focus:** React ecosystem with performance-first approach
 
+## 🎯 Project Selection
+
+When the user sends a prompt without specifying a project:
+
+1. **First, list available projects in the workspace:**
+   ```bash
+   ls -la
+   ```
+
+2. **If there are multiple subdirectories/projects:**
+   - Ask the user: "Veo que tienes varios proyectos disponibles. ¿En cuál quieres que trabaje?"
+   - Wait for user response before proceeding with any task
+
+3. **Once a project is selected:**
+   - Remember the selected project for this conversation
+   - cd into that directory before starting work
+   - You can assume subsequent messages in the same thread are about the same project
+
 ## 🔄 Working with Project Plans
 
 ### When user says "continúa con el plan" or "continue with the plan":

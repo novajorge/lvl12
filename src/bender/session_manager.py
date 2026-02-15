@@ -3,6 +3,7 @@
 import logging
 import uuid
 from asyncio import Lock
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,61 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, str] = {}
         self._lock = Lock()
+
+    async def list_sessions(self) -> list[dict]:
+        """List all active sessions.
+
+        Returns:
+            List of session info with thread_ts and session_id.
+        """
+        async with self._lock:
+            return [
+                {"thread_ts": ts, "session_id": sid}
+                for ts, sid in self._sessions.items()
+            ]
+
+    async def remove_session(self, thread_ts: str) -> bool:
+        """Remove a session from tracking.
+
+        Args:
+            thread_ts: The Slack thread timestamp.
+
+        Returns:
+            True if session was removed, False if not found.
+        """
+        async with self._lock:
+            if thread_ts in self._sessions:
+                del self._sessions[thread_ts]
+                return True
+            return False
+
+    async def abort_session(self, thread_ts: str) -> bool:
+        """Abort a session by killing the Claude session directory.
+
+        Args:
+            thread_ts: The Slack thread timestamp.
+
+        Returns:
+            True if session was aborted, False if not found.
+        """
+        session_id = None
+        async with self._lock:
+            session_id = self._sessions.get(thread_ts)
+
+        if session_id:
+            try:
+                session_dir = Path.home() / ".claude" / "projects" / session_id
+                if session_dir.exists():
+                    import shutil
+                    shutil.rmtree(session_dir)
+                    logger.info("Aborted session %s for thread %s", session_id, thread_ts)
+                    # Remove from tracking
+                    await self.remove_session(thread_ts)
+                    return True
+            except Exception as e:
+                logger.warning("Failed to abort session %s: %s", session_id, e)
+
+        return False
 
     async def create_session(self, thread_ts: str) -> str:
         """Create a new session for a Slack thread.
